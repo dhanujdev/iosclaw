@@ -33,7 +33,22 @@ final class AgentService: ObservableObject {
 
         Task.detached(priority: .userInitiated) { [configuration, client, orchestrator, toolExecutor] in
             let plan = await orchestrator.makePlan(from: messages)
+            let executionID = await MainActor.run {
+                SafetyAuditPersistenceController().record(
+                    category: .agentRun,
+                    severity: .info,
+                    message: "Started agent run for goal: \(plan.goal)"
+                )
+                return TaskExecutionPersistenceController().startRun(for: plan)
+            }
             await orchestrator.transition(to: .acting)
+            await MainActor.run {
+                TaskExecutionPersistenceController().updateRun(
+                    id: executionID,
+                    lifecycleState: .acting,
+                    planJSON: plan.planJSON
+                )
+            }
 
             let response: String
             do {
@@ -50,8 +65,28 @@ final class AgentService: ObservableObject {
                     response = Self.makeStubResponse(messages: messages, configuration: configuration, plan: plan)
                 }
                 await orchestrator.transition(to: .evaluating)
+                await MainActor.run {
+                    TaskExecutionPersistenceController().updateRun(
+                        id: executionID,
+                        lifecycleState: .evaluating,
+                        planJSON: plan.planJSON
+                    )
+                }
             } catch {
                 await orchestrator.transition(to: .failed)
+                await MainActor.run {
+                    TaskExecutionPersistenceController().updateRun(
+                        id: executionID,
+                        lifecycleState: .failed,
+                        planJSON: plan.planJSON,
+                        lastError: error.localizedDescription
+                    )
+                    SafetyAuditPersistenceController().record(
+                        category: .agentRun,
+                        severity: .error,
+                        message: "Agent run failed for goal '\(plan.goal)': \(error.localizedDescription)"
+                    )
+                }
                 response = Self.makeFailureResponse(error: error, plan: plan)
             }
 
@@ -61,6 +96,18 @@ final class AgentService: ObservableObject {
             }
 
             await orchestrator.transition(to: .completed)
+            await MainActor.run {
+                TaskExecutionPersistenceController().updateRun(
+                    id: executionID,
+                    lifecycleState: .completed,
+                    planJSON: plan.planJSON
+                )
+                SafetyAuditPersistenceController().record(
+                    category: .agentRun,
+                    severity: .info,
+                    message: "Completed agent run for goal: \(plan.goal)"
+                )
+            }
             subject.send(completion: .finished)
         }
 

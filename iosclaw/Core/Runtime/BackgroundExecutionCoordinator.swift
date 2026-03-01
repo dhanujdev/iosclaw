@@ -3,6 +3,7 @@ import Foundation
 
 final class BackgroundExecutionCoordinator {
     static let refreshTaskIdentifier = "com.iosclaw.agent.refresh"
+    private let auditStore = SafetyAuditPersistenceController()
 
     func register() {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.refreshTaskIdentifier, using: nil) { task in
@@ -11,7 +12,11 @@ final class BackgroundExecutionCoordinator {
                 return
             }
 
-            self.handle(refreshTask) { }
+            self.handle(refreshTask) {
+                await MainActor.run {
+                    AppMaintenanceCoordinator().performBackgroundMaintenance()
+                }
+            }
         }
     }
 
@@ -22,6 +27,13 @@ final class BackgroundExecutionCoordinator {
         do {
             try BGTaskScheduler.shared.submit(request)
         } catch {
+            Task { @MainActor in
+                self.auditStore.record(
+                    category: .backgroundExecution,
+                    severity: .warning,
+                    message: "Background refresh scheduling failed: \(error.localizedDescription)"
+                )
+            }
             #if DEBUG
             print("Background refresh scheduling failed: \(error)")
             #endif
@@ -40,6 +52,13 @@ final class BackgroundExecutionCoordinator {
 
         task.expirationHandler = {
             worker.cancel()
+            Task { @MainActor in
+                self.auditStore.record(
+                    category: .backgroundExecution,
+                    severity: .warning,
+                    message: "Background refresh expired before maintenance finished."
+                )
+            }
             task.setTaskCompleted(success: false)
         }
     }

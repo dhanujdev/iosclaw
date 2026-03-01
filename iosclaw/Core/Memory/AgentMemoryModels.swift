@@ -144,6 +144,29 @@ final class ApprovalAuditRecord {
     }
 }
 
+@Model
+final class SafetyAuditRecord {
+    @Attribute(.unique) var id: UUID
+    var category: String
+    var severity: String
+    var message: String
+    var createdAt: Date
+
+    init(
+        id: UUID = UUID(),
+        category: String,
+        severity: String,
+        message: String,
+        createdAt: Date = .now
+    ) {
+        self.id = id
+        self.category = category
+        self.severity = severity
+        self.message = message
+        self.createdAt = createdAt
+    }
+}
+
 enum MemorySyncScope: String, Codable {
     case localOnly
     case cloudSynced

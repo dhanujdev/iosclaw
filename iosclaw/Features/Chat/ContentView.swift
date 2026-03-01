@@ -2,16 +2,21 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var vm = ChatViewModel()
+    @State private var expandedRunIDs: Set<UUID> = []
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
                 statusCard
+                if let biometricStatusMessage = vm.biometricStatusMessage {
+                    biometricStatusBanner(message: biometricStatusMessage)
+                }
 
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
                             architectureCard
+                            recentRunsCard
                             if !vm.pendingApprovals.isEmpty {
                                 approvalsCard
                             }
@@ -62,6 +67,13 @@ struct ContentView: View {
             Text("Storage: \(AppModelContainer.syncStatusDescription)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            if let bootstrapIssue = AppModelContainer.bootstrapIssueDescription,
+               !bootstrapIssue.isEmpty {
+                Text("CloudKit issue: \(bootstrapIssue)")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
@@ -117,6 +129,92 @@ struct ContentView: View {
         .padding()
         .background(Color.orange.opacity(0.1))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var recentRunsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("Recent Runs", systemImage: "list.bullet.rectangle")
+                    .font(.headline)
+                Spacer()
+                Text("\(vm.recentRuns.count)")
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.teal.opacity(0.16))
+                    .clipShape(Capsule())
+            }
+
+            if vm.recentRuns.isEmpty {
+                Text("No agent runs yet. Send a prompt or execute a tool command to create the first execution record.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(vm.recentRuns) { run in
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(alignment: .top, spacing: 8) {
+                            lifecycleBadge(for: run.lifecycleState)
+                            Spacer()
+                            Text(run.updatedAt.formatted(date: .abbreviated, time: .shortened))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Text(run.goal)
+                            .font(.subheadline.weight(.semibold))
+
+                        if let lastError = run.lastError, !lastError.isEmpty {
+                            Text(lastError)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+
+                        Button(expandedRunIDs.contains(run.id) ? "Hide PLAN.json" : "Show PLAN.json") {
+                            toggleRunExpansion(id: run.id)
+                        }
+                        .buttonStyle(.bordered)
+
+                        if expandedRunIDs.contains(run.id) {
+                            Text(run.planJSON)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding()
+                                .background(Color(.tertiarySystemBackground))
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .background(Color(.secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(Color.teal.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func biometricStatusBanner(message: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "faceid")
+                .foregroundStyle(.orange)
+
+            Text(message)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button("Dismiss") {
+                vm.dismissBiometricStatus()
+            }
+            .font(.caption.weight(.semibold))
+        }
+        .padding()
+        .background(Color.orange.opacity(0.12))
     }
 
     private var approvalHistoryCard: some View {
@@ -191,6 +289,68 @@ struct ContentView: View {
         .padding()
         .background(.background)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func lifecycleBadge(for state: AgentLifecycleState) -> some View {
+        Text(lifecycleLabel(for: state))
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(lifecycleColor(for: state).opacity(0.16))
+            .foregroundStyle(lifecycleColor(for: state))
+            .clipShape(Capsule())
+    }
+
+    private func toggleRunExpansion(id: UUID) {
+        var updatedRunIDs = expandedRunIDs
+        if expandedRunIDs.contains(id) {
+            updatedRunIDs.remove(id)
+        } else {
+            updatedRunIDs.insert(id)
+        }
+        expandedRunIDs = updatedRunIDs
+    }
+
+    private func lifecycleLabel(for state: AgentLifecycleState) -> String {
+        switch state {
+        case .idle:
+            "Idle"
+        case .observing:
+            "Observing"
+        case .planning:
+            "Planning"
+        case .acting:
+            "Acting"
+        case .evaluating:
+            "Evaluating"
+        case .waitingForApproval:
+            "Waiting"
+        case .completed:
+            "Completed"
+        case .failed:
+            "Failed"
+        }
+    }
+
+    private func lifecycleColor(for state: AgentLifecycleState) -> Color {
+        switch state {
+        case .idle:
+            .gray
+        case .observing:
+            .blue
+        case .planning:
+            .indigo
+        case .acting:
+            .orange
+        case .evaluating:
+            .teal
+        case .waitingForApproval:
+            .yellow
+        case .completed:
+            .green
+        case .failed:
+            .red
+        }
     }
 
     private var composer: some View {

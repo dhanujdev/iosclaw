@@ -8,6 +8,10 @@ struct IOSClawApp: App {
 
     init() {
         backgroundCoordinator.register()
+        backgroundCoordinator.scheduleRefresh()
+        Task { @MainActor in
+            AppMaintenanceCoordinator().performLaunchMaintenance()
+        }
     }
 
     var body: some Scene {

@@ -42,6 +42,7 @@ final class ChatPersistenceController {
         if let existingRecord = try? context.fetch(descriptor).first {
             existingRecord.role = message.role.rawValue
             existingRecord.text = message.text
+            existingRecord.syncScopeRawValue = currentSyncScope().rawValue
         } else {
             let record = MemoryEntry(
                 id: message.id,
@@ -49,7 +50,7 @@ final class ChatPersistenceController {
                 role: message.role.rawValue,
                 text: message.text,
                 createdAt: .now,
-                syncScope: .localOnly
+                syncScope: currentSyncScope()
             )
             context.insert(record)
         }
@@ -76,7 +77,7 @@ final class ChatPersistenceController {
             role: seedMessage.role.rawValue,
             text: seedMessage.text,
             createdAt: .now,
-            syncScope: .localOnly
+            syncScope: currentSyncScope()
         )
         context.insert(seedRecord)
         conversation.updatedAt = .now
@@ -96,5 +97,9 @@ final class ChatPersistenceController {
         context.insert(conversation)
         try? context.save()
         return conversation
+    }
+
+    private func currentSyncScope() -> MemorySyncScope {
+        AppModelContainer.syncMode == .cloudKit ? .cloudSynced : .localOnly
     }
 }

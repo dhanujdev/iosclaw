@@ -120,8 +120,8 @@ actor ToolExecutionEngine {
         if !command.requiresClientApproval {
             let requirement = approvalCoordinator.requirement(for: tool)
             if case let .biometric(reason) = requirement {
-                let approved = await approvalCoordinator.requestBiometricApproval(reason: reason)
-                guard approved else {
+                let approvalResult = await approvalCoordinator.requestBiometricApproval(reason: reason)
+                guard approvalResult.approved else {
                     throw ToolExecutionError.approvalDenied
                 }
             }

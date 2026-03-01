@@ -64,14 +64,17 @@ final class ChatViewModel: ObservableObject {
     @Published var messages: [ChatMessage] = []
     @Published var input: String = ""
     @Published var isGenerating: Bool = false
+    @Published var recentRuns: [RecentExecutionRun] = []
     @Published var pendingApprovals: [PendingApprovalRequest] = []
     @Published var approvalHistory: [ApprovalAuditEntry] = []
     @Published var activeBiometricRequestID: UUID?
+    @Published var biometricStatusMessage: String?
     @Published private(set) var configuration: AppConfiguration
 
     private let service: AgentService
     private let approvalStore: ApprovalPersistenceController
     private let chatStore: ChatPersistenceController
+    private let taskExecutionStore: TaskExecutionPersistenceController
     private let approvalCoordinator: ApprovalCoordinator
     private let toolRegistry: ToolRegistry
     private var cancellable: AnyCancellable?
@@ -91,6 +94,7 @@ final class ChatViewModel: ObservableObject {
         self.service = AgentService(configuration: .live)
         self.approvalStore = ApprovalPersistenceController()
         self.chatStore = ChatPersistenceController()
+        self.taskExecutionStore = TaskExecutionPersistenceController()
         self.approvalCoordinator = ApprovalCoordinator()
         self.toolRegistry = .secureDefault
         reset()
@@ -101,6 +105,7 @@ final class ChatViewModel: ObservableObject {
         self.service = AgentService(configuration: configuration)
         self.approvalStore = ApprovalPersistenceController()
         self.chatStore = ChatPersistenceController()
+        self.taskExecutionStore = TaskExecutionPersistenceController()
         self.approvalCoordinator = ApprovalCoordinator()
         self.toolRegistry = .secureDefault
         reset()
@@ -133,16 +138,24 @@ final class ChatViewModel: ObservableObject {
     func approvePendingRequest(id: UUID) async {
         guard let request = pendingApprovals.first(where: { $0.id == id }) else { return }
         activeBiometricRequestID = id
+        biometricStatusMessage = nil
         defer { activeBiometricRequestID = nil }
 
-        let approved = await requestBiometricApproval(for: request)
-        guard approved else {
+        let approvalResult = await requestBiometricApproval(for: request)
+        guard approvalResult.approved else {
+            let failureText = approvalResult.message ?? "Face ID confirmation failed or is unavailable. The action stayed queued."
             let failedMessage = ChatMessage(
                 role: .system,
-                text: "Face ID confirmation failed or is unavailable. The queued action is still pending: \(request.summary)"
+                text: "\(failureText) Pending action: \(request.summary)"
             )
+            biometricStatusMessage = failureText
             messages.append(failedMessage)
             chatStore.saveOrUpdate(failedMessage)
+            SafetyAuditPersistenceController().record(
+                category: .approval,
+                severity: .warning,
+                message: "Biometric approval failed for queued action: \(request.summary). Reason: \(failureText)"
+            )
             return
         }
 
@@ -154,13 +167,20 @@ final class ChatViewModel: ObservableObject {
             role: .system,
             text: "Approval granted. Executing queued action: \(request.summary)"
         )
+        biometricStatusMessage = nil
         messages.append(approvalMessage)
         chatStore.saveOrUpdate(approvalMessage)
+        SafetyAuditPersistenceController().record(
+            category: .approval,
+            severity: .info,
+            message: "Biometric approval granted for queued action: \(request.summary)"
+        )
         commitSend(prompt: request.prompt)
     }
 
     func denyPendingRequest(id: UUID) {
         guard let request = pendingApprovals.first(where: { $0.id == id }) else { return }
+        biometricStatusMessage = nil
         pendingApprovals.removeAll { $0.id == id }
         approvalStore.delete(id: id)
         approvalStore.recordDecision(for: request, decision: .denied)
@@ -171,6 +191,11 @@ final class ChatViewModel: ObservableObject {
         )
         messages.append(denialMessage)
         chatStore.saveOrUpdate(denialMessage)
+        SafetyAuditPersistenceController().record(
+            category: .approval,
+            severity: .info,
+            message: "Queued action was denied by the user: \(request.summary)"
+        )
     }
 
     private func commitSend(prompt: String) {
@@ -192,6 +217,7 @@ final class ChatViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink(receiveCompletion: { [weak self] _ in
                 self?.isGenerating = false
+                self?.reloadRecentRuns()
                 self?.cancellable = nil
             }, receiveValue: { [weak self] chunk in
                 guard let self = self else { return }
@@ -204,12 +230,15 @@ final class ChatViewModel: ObservableObject {
                     self.messages.append(assistantMessage)
                     self.chatStore.saveOrUpdate(assistantMessage)
                 }
+                self.reloadRecentRuns()
             })
     }
 
     func reset() {
+        reloadRecentRuns()
         pendingApprovals = approvalStore.loadPendingApprovals()
         approvalHistory = approvalStore.loadApprovalHistory()
+        biometricStatusMessage = nil
         let persistedMessages = chatStore.loadMessages()
         if persistedMessages.isEmpty {
             let seedMessage = makeSeedMessage()
@@ -228,26 +257,35 @@ final class ChatViewModel: ObservableObject {
         let seedMessage = makeSeedMessage()
         messages = [seedMessage]
         chatStore.resetThread(with: seedMessage)
+        reloadRecentRuns()
         pendingApprovals = approvalStore.loadPendingApprovals()
         approvalHistory = approvalStore.loadApprovalHistory()
+        biometricStatusMessage = nil
         input = ""
         isGenerating = false
         cancellable?.cancel()
         cancellable = nil
     }
 
-    private func requestBiometricApproval(for request: PendingApprovalRequest) async -> Bool {
+    func dismissBiometricStatus() {
+        biometricStatusMessage = nil
+    }
+
+    private func requestBiometricApproval(for request: PendingApprovalRequest) async -> BiometricApprovalResult {
         guard
             let command = ToolCommand.parse(from: request.prompt),
             let tool = toolRegistry.tool(named: command.toolID)
         else {
-            return false
+            return BiometricApprovalResult(
+                approved: false,
+                message: "The queued action could not be validated. The action stayed queued."
+            )
         }
 
         let requirement = approvalCoordinator.requirement(for: tool)
         switch requirement {
         case .none:
-            return true
+            return BiometricApprovalResult(approved: true, message: nil)
         case let .biometric(reason):
             return await approvalCoordinator.requestBiometricApproval(reason: reason)
         }
@@ -258,5 +296,9 @@ final class ChatViewModel: ObservableObject {
             role: .system,
             text: "Project shell ready. This build includes the app shell, Gemini transport wiring, agent planning state, persistence scaffolds, and a SwiftData-backed pending approvals inbox with approval audit history for high-risk file writes."
         )
+    }
+
+    private func reloadRecentRuns() {
+        recentRuns = taskExecutionStore.loadRecentRuns()
     }
 }

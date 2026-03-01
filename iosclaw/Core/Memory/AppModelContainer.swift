@@ -12,6 +12,7 @@ enum AppModelContainer {
         let container: ModelContainer
         let syncMode: SyncMode
         let statusDescription: String
+        let bootstrapIssueDescription: String?
     }
 
     @MainActor
@@ -22,7 +23,8 @@ enum AppModelContainer {
             TaskExecutionRecord.self,
             UserPreferenceRecord.self,
             PendingApprovalRecord.self,
-            ApprovalAuditRecord.self
+            ApprovalAuditRecord.self,
+            SafetyAuditRecord.self
         ])
 
         let localConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
@@ -34,12 +36,25 @@ enum AppModelContainer {
         let cloudSyncRequested = AppConfiguration.live.enableCloudKitSync
 
         if cloudSyncRequested {
-            if let cloudContainer = try? ModelContainer(for: schema, configurations: [cloudConfiguration]) {
+            do {
+                let cloudContainer = try ModelContainer(for: schema, configurations: [cloudConfiguration])
                 return BootstrapResult(
                     container: cloudContainer,
                     syncMode: .cloudKit,
-                    statusDescription: "CloudKit sync enabled"
+                    statusDescription: "CloudKit sync enabled",
+                    bootstrapIssueDescription: nil
                 )
+            } catch {
+                let issue = error.localizedDescription
+
+                if let localContainer = try? ModelContainer(for: schema, configurations: [localConfiguration]) {
+                    return BootstrapResult(
+                        container: localContainer,
+                        syncMode: .cloudKitFallback,
+                        statusDescription: "CloudKit requested, using local fallback",
+                        bootstrapIssueDescription: issue
+                    )
+                }
             }
         }
 
@@ -49,7 +64,8 @@ enum AppModelContainer {
                 syncMode: cloudSyncRequested ? .cloudKitFallback : .localOnly,
                 statusDescription: cloudSyncRequested
                     ? "CloudKit requested, using local fallback"
-                    : "Local-only persistence"
+                    : "Local-only persistence",
+                bootstrapIssueDescription: nil
             )
         }
 
@@ -69,5 +85,10 @@ enum AppModelContainer {
     @MainActor
     static let syncStatusDescription: String = {
         bootstrap.statusDescription
+    }()
+
+    @MainActor
+    static let bootstrapIssueDescription: String? = {
+        bootstrap.bootstrapIssueDescription
     }()
 }
